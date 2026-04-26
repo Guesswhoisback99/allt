@@ -1,33 +1,28 @@
+import * as echarts from 'echarts/core';
+import { LineChart } from 'echarts/charts';
 import {
-  Chart,
-  LineController,
-  LineElement,
-  PointElement,
-  LinearScale,
-  TimeScale,
-  Tooltip,
-  Filler,
-  type ChartConfiguration,
-  type ScriptableLineSegmentContext,
-} from 'chart.js';
-import 'chartjs-adapter-date-fns';
-import annotationPlugin, { type AnnotationOptions } from 'chartjs-plugin-annotation';
-import zoomPlugin from 'chartjs-plugin-zoom';
+  GridComponent,
+  TooltipComponent,
+  MarkAreaComponent,
+  MarkLineComponent,
+  DataZoomComponent,
+  VisualMapComponent,
+} from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
+import type { EChartsOption, LineSeriesOption } from 'echarts';
 import type { Dataset, Param } from '../types';
 import { fmtVal, status } from '../format';
 
-// D8 / task 6.2: register plugins exactly once at module top-level.
-Chart.register(
-  LineController,
-  LineElement,
-  PointElement,
-  LinearScale,
-  TimeScale,
-  Tooltip,
-  Filler,
-  annotationPlugin,
-  zoomPlugin
-);
+echarts.use([
+  LineChart,
+  GridComponent,
+  TooltipComponent,
+  MarkAreaComponent,
+  MarkLineComponent,
+  DataZoomComponent,
+  VisualMapComponent,
+  CanvasRenderer,
+]);
 
 const P1C = '#3b6fd4';
 const P2C = '#c9a020';
@@ -36,12 +31,9 @@ const DANGER = '#c93535';
 export function initChart(dataset: Dataset): void {
   const sel1 = document.getElementById('sel1') as HTMLSelectElement;
   const sel2 = document.getElementById('sel2') as HTMLSelectElement;
-  const dfrom = document.getElementById('date-from') as HTMLInputElement;
-  const dto = document.getElementById('date-to') as HTMLInputElement;
-  const resetBtn = document.getElementById('btn-reset') as HTMLButtonElement;
   const chipsEl = document.getElementById('event-chips') as HTMLElement;
   const legendEl = document.getElementById('legend') as HTMLElement;
-  const canvas = document.getElementById('mainChart') as HTMLCanvasElement;
+  const chartEl = document.getElementById('mainChart') as HTMLElement;
 
   const { params, events, dates } = dataset;
   if (!dates.length || !params.length) {
@@ -58,12 +50,9 @@ export function initChart(dataset: Dataset): void {
   sel1.value = params[0]!.id;
   sel2.value = params[1]?.id ?? '';
 
-  dfrom.value = dates[0]!;
-  dto.value = dates[dates.length - 1]!;
-
   const activeEvents = new Set<string>(events.map((e) => e.id));
 
-  let chart: Chart<'line', { x: string; y: number }[]> | null = null;
+  const chart = echarts.init(chartEl);
 
   function findParam(id: string): Param | null {
     return params.find((p) => p.id === id) ?? null;
@@ -74,240 +63,310 @@ export function initChart(dataset: Dataset): void {
     return `${d}.${m}.${y}`;
   }
 
-  function buildSeriesData(p: Param): { x: string; y: number }[] {
+  function fmtDatePLLong(iso: string): string {
+    const d = new Date(iso + 'T00:00:00');
+    return d.toLocaleDateString('pl-PL', { year: 'numeric', month: 'long', day: 'numeric' });
+  }
+
+  function buildSeriesData(p: Param): [number, number | null][] {
     const byDate = dataset.values[p.id] ?? {};
-    const out: { x: string; y: number }[] = [];
-    for (const d of dates) {
-      const v = byDate[d];
-      if (v !== undefined) out.push({ x: d, y: v });
-    }
-    return out;
+    return dates.map((d) => [toTs(d), byDate[d] ?? null]);
   }
 
-  function isOut(p: Param, v: number): boolean {
-    if (p.lo !== null && v < p.lo) return true;
-    return v > p.hi;
+  function toTs(d: string): number {
+    return new Date(d + 'T00:00:00').getTime();
   }
 
-  function ptColors(p: Param, data: { y: number }[], base: string): string[] {
-    return data.map((d) => (isOut(p, d.y) ? DANGER : base));
+  const xMin = dates[0]!;
+  const xMax = dates[dates.length - 1]!;
+
+  function clipDate(d: string): string {
+    if (d < xMin) return xMin;
+    if (d > xMax) return xMax;
+    return d;
   }
 
-  function makeDataset(p: Param, color: string, yAxis: 'y1' | 'y2') {
-    const data = buildSeriesData(p);
-    const pc = ptColors(p, data, color);
+  function eventOverlapsData(ev: { date: string; dateTo?: string | null }): boolean {
+    const start = ev.date;
+    const end = ev.dateTo ?? ev.date;
+    return !(end < xMin || start > xMax);
+  }
+
+  function refMarkArea(p: Param, color: string): LineSeriesOption['markArea'] | undefined {
+    if (p.lo === null) return undefined;
     return {
-      label: `${p.short} (${p.unit})`,
-      data,
-      borderColor: color,
-      backgroundColor: color,
-      segment: {
-        borderColor: (ctx: ScriptableLineSegmentContext) => {
-          const v0 = ctx.p0.parsed.y;
-          const v1 = ctx.p1.parsed.y;
-          return isOut(p, v0) || isOut(p, v1) ? DANGER : color;
-        },
-      },
-      pointBackgroundColor: pc,
-      pointBorderColor: pc.map((c) => (c === DANGER ? '#fff' : color)),
-      pointBorderWidth: pc.map((c) => (c === DANGER ? 1.5 : 0)),
-      pointRadius: 5.5,
-      pointHoverRadius: 7.5,
-      borderWidth: 2.5,
-      tension: 0.35,
-      yAxisID: yAxis,
-      spanGaps: true,
+      silent: true,
+      itemStyle: { color: color + '12', borderColor: color + '40', borderWidth: 1 },
+      label: { show: false },
+      data: [[{ yAxis: p.lo }, { yAxis: p.hi }]] as never,
     };
   }
 
-  function rangeAnnotation(p: Param, axis: 'y1' | 'y2', color: string, labelColor: string, position: 'start' | 'end'): AnnotationOptions {
+  function refMarkLine(p: Param, color: string, side: 'left' | 'right'): LineSeriesOption['markLine'] | undefined {
+    const labelPos = side === 'left' ? 'start' : 'end';
+    const labelStyle = {
+      show: true,
+      position: labelPos,
+      color: '#fff',
+      fontFamily: 'DM Mono',
+      fontSize: 10,
+      fontWeight: 'bold' as const,
+      backgroundColor: color,
+      padding: [2, 5],
+      borderRadius: 3,
+      distance: 2,
+    };
     if (p.lo !== null) {
       return {
-        type: 'box',
-        yScaleID: axis,
-        yMin: p.lo,
-        yMax: p.hi,
-        backgroundColor: color + '12',
-        borderColor: color + '40',
-        borderWidth: 1,
-        label: {
-          display: true,
-          content: `▲ norma: ${p.lo}–${p.hi} ${p.unit}`,
-          position: { x: position, y: 'start' },
-          color: labelColor,
-          font: { size: 10, family: 'DM Sans', weight: 'bold' },
-          padding: { x: 6, y: 3 },
-        },
+        silent: true,
+        symbol: 'none',
+        lineStyle: { opacity: 0 },
+        data: [
+          { yAxis: p.lo, label: { ...labelStyle, formatter: `${p.lo}` } },
+          { yAxis: p.hi, label: { ...labelStyle, formatter: `${p.hi}` } },
+        ] as never,
       };
     }
     return {
-      type: 'line',
-      yScaleID: axis,
-      yMin: p.hi,
-      yMax: p.hi,
-      borderColor: color + '60',
-      borderWidth: 1.5,
-      borderDash: [6, 3],
-      label: {
-        display: true,
-        content: `max: ${p.hi} ${p.unit}`,
-        position,
-        color: labelColor,
-        font: { size: 10, family: 'DM Sans', weight: 'bold' },
-        padding: { x: 6, y: 2 },
-      },
+      silent: true,
+      symbol: 'none',
+      lineStyle: { color: color + '90', width: 1.5, type: 'dashed' },
+      data: [
+        { yAxis: p.hi, label: { ...labelStyle, formatter: `max ${p.hi}` } },
+      ] as never,
     };
   }
 
-  function buildConfig(): ChartConfiguration<'line', { x: string; y: number }[]> {
+  const LABEL_LEVELS = 4;
+  const LABEL_LEVEL_PX = 16;
+  const LABEL_BASE_OFFSET = 6;
+
+  function eventLevel(ev: { id: string }): number {
+    const visible = events.filter((e) => activeEvents.has(e.id) && eventOverlapsData(e));
+    return visible.findIndex((e) => e.id === ev.id);
+  }
+
+  function eventMarkArea(): LineSeriesOption['markArea'] {
+    const data: { xAxis: number; itemStyle?: object; label?: object }[][] = [];
+    for (const ev of events) {
+      if (!activeEvents.has(ev.id) || !ev.dateTo) continue;
+      if (!eventOverlapsData(ev)) continue;
+      const yOffset = (eventLevel(ev) % LABEL_LEVELS) * LABEL_LEVEL_PX;
+      data.push([
+        {
+          xAxis: toTs(clipDate(ev.date)),
+          label: { show: true, formatter: ev.label, distance: LABEL_BASE_OFFSET + yOffset },
+        },
+        { xAxis: toTs(clipDate(ev.dateTo)) },
+      ]);
+    }
+    return {
+      silent: false,
+      itemStyle: { color: 'rgba(110,118,135,0.06)', borderColor: 'rgba(110,118,135,0.25)', borderWidth: 1 },
+      label: {
+        show: true,
+        position: 'top',
+        color: '#3d4250',
+        fontFamily: 'DM Sans',
+        fontSize: 11,
+        fontWeight: 600,
+        overflow: 'none',
+        backgroundColor: '#fff',
+        borderColor: '#dde1ea',
+        borderWidth: 1,
+        padding: [4, 8],
+        borderRadius: 999,
+        shadowColor: 'rgba(20,25,40,0.06)',
+        shadowBlur: 4,
+        shadowOffsetY: 1,
+      },
+      data: data as never,
+    };
+  }
+
+  function eventMarkLine(): LineSeriesOption['markLine'] {
+    const data: { xAxis: number; label?: object }[] = [];
+    for (const ev of events) {
+      if (!activeEvents.has(ev.id) || ev.dateTo) continue;
+      if (!eventOverlapsData(ev)) continue;
+      const yOffset = (eventLevel(ev) % LABEL_LEVELS) * LABEL_LEVEL_PX;
+      data.push({
+        xAxis: toTs(clipDate(ev.date)),
+        label: { show: true, formatter: ev.label, distance: LABEL_BASE_OFFSET + yOffset },
+      });
+    }
+    return {
+      silent: true,
+      symbol: 'none',
+      lineStyle: { color: 'rgba(110,118,135,0.4)', width: 1.25, type: 'dashed' },
+      label: {
+        show: true,
+        position: 'end',
+        color: '#3d4250',
+        fontFamily: 'DM Sans',
+        fontSize: 11,
+        fontWeight: 600,
+        backgroundColor: '#fff',
+        borderColor: '#dde1ea',
+        borderWidth: 1,
+        padding: [4, 8],
+        borderRadius: 999,
+        shadowColor: 'rgba(20,25,40,0.06)',
+        shadowBlur: 4,
+        shadowOffsetY: 1,
+      },
+      data: data as never,
+    };
+  }
+
+  function makeSeries(p: Param, color: string, yAxisIndex: 0 | 1): LineSeriesOption {
+    const side: 'left' | 'right' = yAxisIndex === 0 ? 'left' : 'right';
+    const series: LineSeriesOption = {
+      name: `${p.short} (${p.unit})`,
+      type: 'line',
+      yAxisIndex,
+      smooth: 0.35,
+      data: buildSeriesData(p),
+      connectNulls: true,
+      symbol: 'circle',
+      symbolSize: 9,
+      lineStyle: { color, width: 2.5 },
+      itemStyle: { color },
+      emphasis: { scale: 1.25 },
+    };
+    const refArea = refMarkArea(p, color);
+    const refLine = refMarkLine(p, color, side);
+    if (refArea) series.markArea = refArea;
+    if (refLine) series.markLine = refLine;
+    return series;
+  }
+
+  function makeEventsSeries(): LineSeriesOption {
+    return {
+      type: 'line',
+      data: [[toTs(xMin), null], [toTs(xMax), null]],
+      yAxisIndex: 0,
+      silent: true,
+      showSymbol: false,
+      lineStyle: { opacity: 0 },
+      tooltip: { show: false },
+      markArea: eventMarkArea(),
+      markLine: eventMarkLine(),
+    };
+  }
+
+  function makeVisualMap(p: Param, color: string, seriesIndex: number): EChartsOption['visualMap'] {
+    const pieces: { lt?: number; gt?: number; color: string }[] = [];
+    if (p.lo !== null) pieces.push({ lt: p.lo, color: DANGER });
+    pieces.push({ gt: p.hi, color: DANGER });
+    return {
+      show: false,
+      type: 'piecewise',
+      seriesIndex,
+      dimension: 1,
+      pieces,
+      outOfRange: { color },
+    };
+  }
+
+  function buildOption(): EChartsOption {
     const p1 = findParam(sel1.value);
     const p2id = sel2.value;
     const p2 = p2id && p2id !== sel1.value ? findParam(p2id) : null;
 
-    const datasets: ReturnType<typeof makeDataset>[] = [];
-    const annotations: Record<string, AnnotationOptions> = {};
-
-    for (const ev of events) {
-      if (!activeEvents.has(ev.id)) continue;
-      const key = `ev_${ev.id}`;
-      if (ev.dateTo) {
-        annotations[key] = {
-          type: 'box',
-          xMin: ev.date,
-          xMax: ev.dateTo,
-          backgroundColor: 'rgba(110,118,135,0.08)',
-          borderColor: 'rgba(110,118,135,0.3)',
-          borderWidth: 1,
-          label: {
-            display: true,
-            content: ev.label,
-            position: { x: 'center', y: 'start' },
-            yAdjust: 8,
-            color: '#5a6070',
-            font: { size: 10.5, family: 'DM Sans', weight: 500 },
-            padding: { x: 7, y: 4 },
-          },
-        };
-      } else {
-        annotations[key] = {
-          type: 'line',
-          xMin: ev.date,
-          xMax: ev.date,
-          borderColor: 'rgba(110,118,135,0.45)',
-          borderWidth: 1.5,
-          borderDash: [5, 4],
-          label: {
-            display: true,
-            content: ev.label,
-            position: 'start',
-            yAdjust: 8,
-            color: '#5a6070',
-            font: { size: 10.5, family: 'DM Sans', weight: 500 },
-            padding: { x: 7, y: 4 },
-          },
-        };
-      }
-    }
+    const series: LineSeriesOption[] = [];
+    const visualMaps: NonNullable<EChartsOption['visualMap']>[] = [];
 
     if (p1) {
-      datasets.push(makeDataset(p1, P1C, 'y1'));
-      annotations['ref1'] = rangeAnnotation(p1, 'y1', P1C, 'rgba(59,111,212,0.7)', 'start');
+      series.push(makeSeries(p1, P1C, 0));
+      visualMaps.push(makeVisualMap(p1, P1C, 0) as never);
     }
     if (p2) {
-      datasets.push(makeDataset(p2, P2C, 'y2'));
-      annotations['ref2'] = rangeAnnotation(p2, 'y2', P2C, 'rgba(180,140,10,0.75)', 'end');
+      series.push(makeSeries(p2, P2C, 1));
+      visualMaps.push(makeVisualMap(p2, P2C, p1 ? 1 : 0) as never);
     }
+    series.push(makeEventsSeries());
 
     return {
-      type: 'line',
-      data: { datasets: datasets as never },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: 'index', intersect: false },
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            backgroundColor: '#fff',
-            borderColor: '#dde1ea',
-            borderWidth: 1,
-            titleColor: '#1a1d23',
-            bodyColor: '#5a6070',
-            padding: 13,
-            titleFont: { family: 'DM Sans', size: 13, weight: 'bold' },
-            bodyFont: { family: 'DM Mono', size: 12.5 },
-            boxPadding: 4,
-            callbacks: {
-              title: (items) => {
-                const d = new Date(items[0]!.parsed.x);
-                return d.toLocaleDateString('pl-PL', { year: 'numeric', month: 'long', day: 'numeric' });
-              },
-              label: (item) => {
-                const p = item.datasetIndex === 0 ? p1 : p2;
-                if (!p) return '';
-                const v = item.parsed.y;
-                const s = status(v, p);
-                const flag = s === 'ok' ? '' : s === 'high' ? ' ↑ za wysoki' : ' ↓ za niski';
-                return `  ${p.name}: ${fmtVal(v)} ${p.unit}${flag}`;
-              },
-            },
-          },
-          annotation: { annotations },
-          zoom: {
-            zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
-            pan: { enabled: true, mode: 'x' },
-            limits: { x: { min: 'original', max: 'original' } },
-          },
-        },
-        scales: {
-          x: {
-            type: 'time',
-            time: {
-              unit: 'day',
-              tooltipFormat: 'dd-MM-yyyy',
-              displayFormats: { day: 'dd-MM-yyyy' },
-            },
-            min: dfrom.value,
-            max: dto.value,
-            grid: { color: '#eef0f4' },
-            ticks: {
-              font: { family: 'DM Mono', size: 11 },
-              color: '#9aa0af',
-              maxRotation: 45,
-              minRotation: 45,
-            },
-            border: { color: '#dde1ea' },
-          },
-          y1: {
-            type: 'linear',
-            position: 'left',
-            display: !!p1,
-            title: {
-              display: !!p1,
-              text: p1 ? `${p1.name}  (${p1.unit})` : '',
-              color: P1C,
-              font: { family: 'DM Sans', size: 12, weight: 500 },
-            },
-            ticks: { color: P1C, font: { family: 'DM Mono', size: 11 } },
-            grid: { color: '#eef0f4' },
-            border: { color: '#dde1ea' },
-          },
-          y2: {
-            type: 'linear',
-            position: 'right',
-            display: !!p2,
-            title: {
-              display: !!p2,
-              text: p2 ? `${p2.name}  (${p2.unit})` : '',
-              color: P2C,
-              font: { family: 'DM Sans', size: 12, weight: 500 },
-            },
-            ticks: { color: P2C, font: { family: 'DM Mono', size: 11 } },
-            grid: { display: false },
-            border: { color: '#dde1ea' },
-          },
+      animation: false,
+      grid: { left: 64, right: 64, top: 96, bottom: 110 },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#fff',
+        borderColor: '#dde1ea',
+        borderWidth: 1,
+        padding: 13,
+        textStyle: { color: '#5a6070', fontFamily: 'DM Mono', fontSize: 12.5 },
+        axisPointer: { type: 'line', lineStyle: { color: '#c8cdd8' } },
+        formatter: (rawParams) => {
+          const items = rawParams as unknown as { axisValue: string | number; seriesIndex: number; value: number | [string, number] | null }[];
+          if (!items.length) return '';
+          const av = items[0]!.axisValue;
+          const isoLike = typeof av === 'string' ? av : new Date(av).toISOString().slice(0, 10);
+          const title = `<div style="font-family:DM Sans;font-weight:bold;color:#1a1d23;font-size:13px;margin-bottom:4px;">${fmtDatePLLong(isoLike)}</div>`;
+          const lines = items
+            .map((it) => {
+              if (it.value === null || it.value === undefined) return '';
+              const p = it.seriesIndex === 0 ? p1 : p2;
+              if (!p) return '';
+              const num = Array.isArray(it.value) ? (it.value[1] as number) : (it.value as number);
+              const s = status(num, p);
+              const flag = s === 'ok' ? '' : s === 'high' ? ' ↑ za wysoki' : ' ↓ za niski';
+              return `  ${p.name}: ${fmtVal(num)} ${p.unit}${flag}`;
+            })
+            .filter(Boolean)
+            .join('<br>');
+          return title + lines;
         },
       },
+      xAxis: {
+        type: 'time',
+        min: xMin,
+        max: xMax,
+        axisLine: { lineStyle: { color: '#dde1ea' } },
+        axisLabel: {
+          color: '#9aa0af',
+          fontFamily: 'DM Mono',
+          fontSize: 11,
+          rotate: 45,
+          hideOverlap: true,
+          formatter: (v: number) => {
+            const dt = new Date(v);
+            const dd = String(dt.getDate()).padStart(2, '0');
+            const mm = String(dt.getMonth() + 1).padStart(2, '0');
+            return `${dd}.${mm}.${dt.getFullYear()}`;
+          },
+        },
+        splitLine: { show: true, lineStyle: { color: '#eef0f4' } },
+      },
+      yAxis: [
+        {
+          type: 'value',
+          show: !!p1,
+          position: 'left',
+          name: p1 ? `${p1.name}  (${p1.unit})` : '',
+          nameTextStyle: { color: P1C, fontFamily: 'DM Sans', fontSize: 12, fontWeight: 500 },
+          axisLabel: { color: P1C, fontFamily: 'DM Mono', fontSize: 11 },
+          axisLine: { lineStyle: { color: '#dde1ea' } },
+          splitLine: { lineStyle: { color: '#eef0f4' } },
+        },
+        {
+          type: 'value',
+          show: !!p2,
+          position: 'right',
+          name: p2 ? `${p2.name}  (${p2.unit})` : '',
+          nameTextStyle: { color: P2C, fontFamily: 'DM Sans', fontSize: 12, fontWeight: 500 },
+          axisLabel: { color: P2C, fontFamily: 'DM Mono', fontSize: 11 },
+          axisLine: { lineStyle: { color: '#dde1ea' } },
+          splitLine: { show: false },
+        },
+      ],
+      dataZoom: [
+        { type: 'inside', xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: false },
+        { type: 'slider', xAxisIndex: 0, height: 22, bottom: 16, borderColor: '#dde1ea', fillerColor: 'rgba(59,111,212,0.08)', handleStyle: { color: '#fff', borderColor: '#3b6fd4' }, textStyle: { color: '#9aa0af', fontFamily: 'DM Mono', fontSize: 10 } },
+      ],
+      visualMap: visualMaps.length === 1 ? visualMaps[0] : (visualMaps as never),
+      series,
     };
   }
 
@@ -350,13 +409,16 @@ export function initChart(dataset: Dataset): void {
     chipsEl.innerHTML = events
       .map((ev) => {
         const on = activeEvents.has(ev.id);
+        const inRange = eventOverlapsData(ev);
         const rangeStr = ev.dateTo
           ? ` <span style="font-size:10px;opacity:0.6;font-family:var(--mono);">${fmtDatePLLocal(ev.date)}–${fmtDatePLLocal(ev.dateTo)}</span>`
           : ` <span style="font-size:10px;opacity:0.6;font-family:var(--mono);">${fmtDatePLLocal(ev.date)}</span>`;
         const inner = ev.dateTo
           ? `<span class="chip-band"></span>`
           : `<span class="chip-dash"></span><span class="chip-dot"></span>`;
-        return `<button class="event-chip${on ? ' on' : ''}" data-id="${ev.id}">
+        const cls = `event-chip${on ? ' on' : ''}${inRange ? '' : ' out-of-range'}`;
+        const title = inRange ? '' : ' title="Poza zakresem danych — niewidoczne na wykresie"';
+        return `<button class="${cls}" data-id="${ev.id}"${title}>
           ${inner}
           ${ev.label}${rangeStr}
         </button>`;
@@ -375,31 +437,68 @@ export function initChart(dataset: Dataset): void {
   }
 
   function updateChart(): void {
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    if (chart) chart.destroy();
-    chart = new Chart(ctx, buildConfig());
+    chart.setOption(buildOption(), { notMerge: true, lazyUpdate: true });
     updateLegend();
   }
 
   sel1.addEventListener('change', updateChart);
   sel2.addEventListener('change', updateChart);
-  dfrom.addEventListener('change', () => {
-    if (chart) {
-      chart.options.scales!['x']!.min = dfrom.value;
-      chart.update();
+  window.addEventListener('resize', () => chart.resize());
+
+  function currentZoom(): { start: number; end: number } {
+    const opt = chart.getOption() as { dataZoom?: { start?: number; end?: number }[] };
+    const dz = opt.dataZoom?.[0];
+    return { start: dz?.start ?? 0, end: dz?.end ?? 100 };
+  }
+
+  function applyZoom(start: number, end: number): void {
+    const min = 0;
+    const max = 100;
+    const minSpan = 1;
+    let s = Math.max(min, start);
+    let e = Math.min(max, end);
+    if (e - s < minSpan) {
+      const mid = (s + e) / 2;
+      s = Math.max(min, mid - minSpan / 2);
+      e = Math.min(max, s + minSpan);
     }
+    chart.dispatchAction({ type: 'dataZoom', start: s, end: e });
+  }
+
+  document.getElementById('reset-zoom')?.addEventListener('click', () => {
+    applyZoom(0, 100);
   });
-  dto.addEventListener('change', () => {
-    if (chart) {
-      chart.options.scales!['x']!.max = dto.value;
-      chart.update();
-    }
+  document.getElementById('zoom-in')?.addEventListener('click', () => {
+    const { start, end } = currentZoom();
+    const span = end - start;
+    const next = span * 0.6;
+    const mid = (start + end) / 2;
+    applyZoom(mid - next / 2, mid + next / 2);
   });
-  resetBtn.addEventListener('click', () => {
-    dfrom.value = dates[0]!;
-    dto.value = dates[dates.length - 1]!;
-    updateChart();
+  document.getElementById('zoom-out')?.addEventListener('click', () => {
+    const { start, end } = currentZoom();
+    const span = end - start;
+    const next = Math.min(100, span / 0.6);
+    const mid = (start + end) / 2;
+    let s = mid - next / 2;
+    let e = mid + next / 2;
+    if (s < 0) { e -= s; s = 0; }
+    if (e > 100) { s -= e - 100; e = 100; }
+    applyZoom(s, e);
+  });
+  document.getElementById('pan-left')?.addEventListener('click', () => {
+    const { start, end } = currentZoom();
+    const span = end - start;
+    const step = Math.max(1, span * 0.25);
+    const shift = Math.min(start, step);
+    applyZoom(start - shift, end - shift);
+  });
+  document.getElementById('pan-right')?.addEventListener('click', () => {
+    const { start, end } = currentZoom();
+    const span = end - start;
+    const step = Math.max(1, span * 0.25);
+    const shift = Math.min(100 - end, step);
+    applyZoom(start + shift, end + shift);
   });
 
   renderChips();
