@@ -1,0 +1,20 @@
+{
+  "builtAt": "2026-04-26T06:01:07.331Z",
+  "inputs": [
+    {
+      "label": "PARAMS_CSV",
+      "path": "/Users/dawid/projects/allt/data/params.sample.csv",
+      "sha256": "d74cef143a7c9e9076544319392d3cc0816213a13ce5834361e3b2db50d8261f"
+    },
+    {
+      "label": "RESULTS_CSV",
+      "path": "/Users/dawid/projects/allt/data/results.sample.csv",
+      "sha256": "2a48b3f3ddfc4cc8c5efd0261fccdcf41f3feed25f46849b2b52808223ff2a10"
+    },
+    {
+      "label": "EVENTS_CSV",
+      "path": "/Users/dawid/projects/allt/data/events.sample.csv",
+      "sha256": "6824462da2236f04f0b376bec95cf5e5bac686cff5a33e678114c68d3eb9b0fd"
+    }
+  ]
+}
