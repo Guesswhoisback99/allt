@@ -2,13 +2,13 @@ import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import Papa from 'papaparse';
+import { z } from 'zod';
 import type { Plugin } from 'vite';
 import type { Dataset, EventAnno, Param, Result } from '../src/types';
+import { paramsSchema, resultsSchema, eventsSchema } from '../src/schema';
 
 const VIRTUAL_ID = 'virtual:dataset';
 const RESOLVED_ID = '\0' + VIRTUAL_ID;
-
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 interface CsvRow {
   [k: string]: string;
@@ -62,105 +62,28 @@ function requireColumns(label: string, rows: CsvRow[], cols: string[]): void {
   }
 }
 
-function parseNumber(s: string | undefined): number | null {
-  if (s === undefined || s === '') return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : NaN;
+function formatZodError(label: string, error: z.ZodError, rows: CsvRow[]): BuildError {
+  const issue = error.issues[0]!;
+  const rowIdx = typeof issue.path[0] === 'number' ? issue.path[0] : -1;
+  const rn = rowIdx + 2; // header is row 1
+  const id = rowIdx >= 0 ? rows[rowIdx]?.['id'] ?? '' : '';
+  const idPart = id ? ` (id="${id}")` : '';
+  const fieldPath = issue.path.slice(1).filter((p) => typeof p === 'string');
+  const field = fieldPath.join('.');
+  const fieldPart = field ? `${field}: ` : '';
+  return new BuildError(`[${label}] row ${rn}${idPart}: ${fieldPart}${issue.message}`);
 }
 
-function validateParams(file: CsvFile): Param[] {
-  requireColumns('PARAMS_CSV', file.rows, ['id', 'name', 'short', 'unit', 'lo', 'hi']);
-  const out: Param[] = [];
-  const seen = new Set<string>();
-  file.rows.forEach((row, i) => {
-    const rn = i + 2;
-    const id = row['id'] ?? '';
-    if (!id) throw new BuildError(`[PARAMS_CSV] row ${rn}: empty id`);
-    if (seen.has(id)) throw new BuildError(`[PARAMS_CSV] row ${rn}: duplicate id "${id}"`);
-    seen.add(id);
-    const name = row['name'] ?? '';
-    const short = row['short'] ?? '';
-    const unit = row['unit'] ?? '';
-    if (!name) throw new BuildError(`[PARAMS_CSV] row ${rn}: empty name`);
-    const hi = parseNumber(row['hi']);
-    if (hi === null || Number.isNaN(hi)) {
-      throw new BuildError(`[PARAMS_CSV] row ${rn} (id="${id}"): hi must be a number, got "${row['hi']}"`);
-    }
-    if (hi <= 0) {
-      throw new BuildError(`[PARAMS_CSV] row ${rn} (id="${id}"): hi must be > 0, got ${hi}`);
-    }
-    const loRaw = row['lo'] ?? '';
-    let lo: number | null;
-    if (loRaw === '') {
-      lo = null;
-    } else {
-      const parsed = parseNumber(loRaw);
-      if (parsed === null || Number.isNaN(parsed)) {
-        throw new BuildError(`[PARAMS_CSV] row ${rn} (id="${id}"): lo must be empty or numeric, got "${loRaw}"`);
-      }
-      lo = parsed;
-      if (hi <= lo) {
-        throw new BuildError(`[PARAMS_CSV] row ${rn} (id="${id}"): hi (${hi}) must be > lo (${lo})`);
-      }
-    }
-    out.push({ id, name, short, unit, lo, hi });
-  });
-  return out;
-}
-
-function validateResults(file: CsvFile, params: Param[]): Result[] {
-  requireColumns('RESULTS_CSV', file.rows, ['date', 'param_id', 'value']);
-  const validIds = new Set(params.map((p) => p.id));
-  const out: Result[] = [];
-  file.rows.forEach((row, i) => {
-    const rn = i + 2;
-    const date = row['date'] ?? '';
-    if (!ISO_DATE.test(date)) {
-      throw new BuildError(`[RESULTS_CSV] row ${rn}: date must be YYYY-MM-DD, got "${date}"`);
-    }
-    const paramId = row['param_id'] ?? '';
-    if (!validIds.has(paramId)) {
-      throw new BuildError(`[RESULTS_CSV] row ${rn}: unknown param_id "${paramId}"`);
-    }
-    const value = parseNumber(row['value']);
-    if (value === null || Number.isNaN(value)) {
-      throw new BuildError(`[RESULTS_CSV] row ${rn}: value must be a number, got "${row['value']}"`);
-    }
-    out.push({ date, paramId, value });
-  });
-  return out;
-}
-
-function validateEvents(file: CsvFile): EventAnno[] {
-  requireColumns('EVENTS_CSV', file.rows, ['id', 'date', 'date_to', 'label']);
-  const out: EventAnno[] = [];
-  const seen = new Set<string>();
-  file.rows.forEach((row, i) => {
-    const rn = i + 2;
-    const id = row['id'] ?? '';
-    if (!id) throw new BuildError(`[EVENTS_CSV] row ${rn}: empty id`);
-    if (seen.has(id)) throw new BuildError(`[EVENTS_CSV] row ${rn}: duplicate id "${id}"`);
-    seen.add(id);
-    const date = row['date'] ?? '';
-    if (!ISO_DATE.test(date)) {
-      throw new BuildError(`[EVENTS_CSV] row ${rn} (id="${id}"): date must be YYYY-MM-DD, got "${date}"`);
-    }
-    const dateToRaw = row['date_to'] ?? '';
-    let dateTo: string | null = null;
-    if (dateToRaw !== '') {
-      if (!ISO_DATE.test(dateToRaw)) {
-        throw new BuildError(`[EVENTS_CSV] row ${rn} (id="${id}"): date_to must be YYYY-MM-DD or empty, got "${dateToRaw}"`);
-      }
-      if (dateToRaw <= date) {
-        throw new BuildError(`[EVENTS_CSV] row ${rn} (id="${id}"): date_to (${dateToRaw}) must be strictly after date (${date})`);
-      }
-      dateTo = dateToRaw;
-    }
-    const label = row['label'] ?? '';
-    if (!label) throw new BuildError(`[EVENTS_CSV] row ${rn} (id="${id}"): empty label`);
-    out.push({ id, date, dateTo, label });
-  });
-  return out;
+function parseWithSchema<T>(
+  label: string,
+  file: CsvFile,
+  cols: string[],
+  schema: z.ZodType<T[], any, any>
+): T[] {
+  requireColumns(label, file.rows, cols);
+  const parsed = schema.safeParse(file.rows);
+  if (!parsed.success) throw formatZodError(label, parsed.error, file.rows);
+  return parsed.data;
 }
 
 function buildDataset(params: Param[], results: Result[], events: EventAnno[]): Dataset {
@@ -197,9 +120,32 @@ function loadAll(): LoadedData {
   const resultsFile = readCsv(resultsPath, 'RESULTS_CSV');
   const eventsFile = readCsv(eventsPath, 'EVENTS_CSV');
 
-  const params = validateParams(paramsFile);
-  const results = validateResults(resultsFile, params);
-  const events = validateEvents(eventsFile);
+  const params = parseWithSchema<Param>(
+    'PARAMS_CSV',
+    paramsFile,
+    ['id', 'name', 'short', 'unit', 'lo', 'hi'],
+    paramsSchema
+  );
+  const results = parseWithSchema<Result>(
+    'RESULTS_CSV',
+    resultsFile,
+    ['date', 'param_id', 'value'],
+    resultsSchema
+  );
+  const events = parseWithSchema<EventAnno>(
+    'EVENTS_CSV',
+    eventsFile,
+    ['id', 'date', 'date_to', 'label'],
+    eventsSchema
+  );
+
+  // Cross-file FK: results.param_id must exist in params.id
+  const validIds = new Set(params.map((p) => p.id));
+  results.forEach((r, i) => {
+    if (!validIds.has(r.paramId)) {
+      throw new BuildError(`[RESULTS_CSV] row ${i + 2}: unknown param_id "${r.paramId}"`);
+    }
+  });
 
   const dataset = buildDataset(params, results, events);
 

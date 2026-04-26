@@ -15,6 +15,8 @@ EVENTS_CSV=$HOME/labs/jan/events.csv \
 
 ## CSV schemas
 
+The authoritative definition lives in [`src/schema.ts`](src/schema.ts) (zod). The summary below mirrors it.
+
 **`params.csv`** — `id,name,short,unit,lo,hi`
 - `id` unique, `hi > 0`. Empty `lo` = upper-bound-only; numeric `lo` (incl. `0`) is a real floor and requires `hi > lo`.
 

@@ -1,25 +1,6 @@
-export interface Param {
-  id: string;
-  name: string;
-  short: string;
-  unit: string;
-  /** `null` means upper-bound-only (no lower bound). A numeric value, including `0`, is a real floor. */
-  lo: number | null;
-  hi: number;
-}
+export type { Param, Result, EventAnno } from './schema';
 
-export interface Result {
-  date: string;
-  paramId: string;
-  value: number;
-}
-
-export interface EventAnno {
-  id: string;
-  date: string;
-  dateTo: string | null;
-  label: string;
-}
+import type { Param, EventAnno } from './schema';
 
 export interface Dataset {
   params: Param[];
