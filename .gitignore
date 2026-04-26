@@ -2,13 +2,13 @@ node_modules/
 dist/
 .DS_Store
 *.log
+*.png
+.playwright-mcp/
 
 # Local env overrides (real patient paths) — never commit.
 .env
 .env.local
 .env.*.local
 
-# Real patient CSVs MUST live outside this repo (e.g. ~/labs/<patient>/).
-# Only sample files are tracked.
-data/*
-!data/*.sample.csv
+# All CSV data lives outside the repo or locally only. Nothing in data/ is tracked.
+data/
